@@ -748,8 +748,13 @@ def main():
         ctx.enable(moderngl.DEPTH_TEST)
         ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
 
+        # Choose display positions for overlays (radius circles, neighbor lines)
+        overlay_pos = (mountain_display_pos
+                       if mountain_params['enabled'] and mountain_display_pos is not None
+                       else sim.pos.astype(np.float32))
+
         if params['show_neighbors'] and sim.nbr_ids is not None:
-            lines = sim.get_neighbor_lines()
+            lines = sim.get_neighbor_lines(display_pos=overlay_pos)
             n_line_verts = len(lines)
             if n_line_verts > 0:
                 needed = n_line_verts * 3 * 4
@@ -764,7 +769,7 @@ def main():
         if params['show_radius']:
             cam_right, cam_up = camera.get_right_up()
             circles = make_radius_circles_3d(
-                sim.pos.astype(np.float32), params['neighbor_radius'],
+                overlay_pos, params['neighbor_radius'],
                 cam_right, cam_up)
             n_circle_verts = len(circles)
             if n_circle_verts > 0:

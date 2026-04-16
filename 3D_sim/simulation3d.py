@@ -837,17 +837,30 @@ class Simulation:
         rgb[:, 2] = np.abs(vz / safe_mag) * brightness
         return rgb
 
-    def get_neighbor_lines(self):
-        """Output (m, 3) line vertices for neighbor visualization."""
+    def get_neighbor_lines(self, display_pos=None):
+        """Output (m, 3) line vertices for neighbor visualization.
+
+        Parameters
+        ----------
+        display_pos : ndarray (N, 3), optional
+            If provided, use these positions for rendering instead of
+            self.pos.  Useful when mountain mode projects particles
+            onto a 3D surface while physics runs in 2D.
+        """
         if self.nbr_ids is None:
             return np.zeros((0, 3), dtype=np.float32)
-        pos = self.pos
+        pos = display_pos if display_pos is not None else self.pos
         nbr_ids = self.nbr_ids
         n, n_nbr = nbr_ids.shape
 
         starts = np.repeat(pos, n_nbr, axis=0)
         nbr_pos = pos[nbr_ids.ravel()]
-        delta = periodic_dist(starts, nbr_pos)
+        # When using display_pos, compute delta directly (no periodic wrap
+        # needed since display coords are already in render space)
+        if display_pos is not None:
+            delta = nbr_pos - starts
+        else:
+            delta = periodic_dist(starts, nbr_pos)
         ends = starts + delta
 
         if self._valid_mask is not None:
