@@ -48,9 +48,8 @@ This PR adds the final active exploration mechanism and the visual representatio
 
 **The Result:** Particles physically "walk" on the growing knowledge mountain, driven purely by base preference physics and reward-weighted social influence.
 
-## Summary of Changes from Current Branch
+## Design Principles
 
-- **No preference hijacking**: Particles move spatially; preferences remain pure social signals.
+- **Spatial position is skill**: Particles move spatially; preferences remain pure social signals.
 - **No explicit gradient climbing**: Regular particles find peaks via social alignment, not by computing $\nabla M$.
-- **No adaptive noise**: Base spatial exploration is sufficient.
-- **Unified architecture**: The knowledge field is architecturally identical to the spatial memory field (accumulation, decay, blur), just with a fitness ceiling and a scalar reward output instead of a preference vector output.
+- **Unified architecture**: The knowledge field is architecturally identical to the spatial memory field (accumulation, decay, blur), with two additional constraints (fitness ceiling, structural support) and a scalar reward output instead of a preference vector output.
