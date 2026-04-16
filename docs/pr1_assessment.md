@@ -35,9 +35,9 @@ All modifications are gated behind `mountain_params['enabled']` (toggled via `--
 
 | Hook | Location | What it does |
 |------|----------|--------------|
-| `mountain_params` dict | After `params` | Configuration for write rate, decay, diffusion, max slope, visionary fraction |
+| `mountain_params` dict | After `params` | Configuration for write rate, decay, diffusion, max slope |
 | `build_mountain()` | Lazy init | Creates `Landscape` and `KnowledgeField` instances |
-| `knowledge_step()` | After `sim.step()` | Deposits knowledge at particle positions; applies visionary spatial nudge |
+| `knowledge_step()` | After `sim.step()` | Deposits knowledge at particle positions |
 | `rebuild_mountain_mesh()` | Before render | Updates mesh vertices from current grid state |
 | Mountain rendering | Render loop | Draws solid knowledge mesh + wireframe ghost of hidden fitness |
 | imgui controls | Settings panel | Sliders for all mountain parameters + live coverage/peak readout |
@@ -65,9 +65,9 @@ The headless test (`scripts/test_knowledge_pr1.py`) runs 18,000 steps with 300 p
 
 The blue **Coverage** curve shows the fraction of grid cells with knowledge above a threshold (0.01). It rises rapidly in the first 2,000 steps as particles spread across the domain, then plateaus around 74%. The red **Peak Knowledge** curve tracks the maximum value in the grid. It climbs to ~0.68, then gradually settles to ~0.64 as decay balances accumulation. The peak never reaches 1.0 because the fitness ceiling and structural support constraint limit how high any single cell can grow without broad surrounding support.
 
-### Top Right: Drift Toward Global Peak
+### Top Right: Knowledge vs Fitness (per cell)
 
-This panel tracks the mean Euclidean distance from particles to the hidden global peak at $(0.8, 0.85)$. The red curve (visionaries, ~2% of particles) stays consistently closer to the peak than the blue curve (regular particles). Over 18,000 steps, visionaries drift 0.023 units closer while regulars drift only 0.015 — confirming that the visionary spatial nudge along $\nabla F$ works as intended. Regular particles, which are blind to the hidden fitness landscape, show no systematic drift.
+This scatter plot compares the hidden fitness $F(x,y)$ of each cell against its accumulated knowledge $M(x,y)$ at step 18,000. The red dashed line represents the fitness ceiling constraint ($M = F$). The plot shows a strong positive correlation ($r = 0.827$), confirming that knowledge accumulates to higher levels in high-fitness regions. This happens purely because the ceiling constraint allows more accumulation there, even though the particles depositing the knowledge are doing completely random walks and are blind to the fitness landscape.
 
 ### Bottom Left: Final Knowledge Surface
 
@@ -75,7 +75,7 @@ The 2D heatmap shows the knowledge grid $M(x,y)$ at step 18,000. Brighter region
 
 ### Bottom Right: Hidden Fitness Landscape
 
-The fitness landscape $F(x,y)$ that particles cannot directly observe (except visionaries, who sense its gradient). The dominant peak is in the upper-right region around $(0.8, 0.85)$, with secondary peaks scattered across the domain. Comparing with the bottom-left panel, the knowledge surface has begun to mirror the fitness landscape's structure — higher knowledge accumulates where fitness is higher — even though most particles are blind to $F$. This correlation emerges purely from the fitness ceiling constraint: particles can deposit more knowledge in high-fitness regions because the ceiling is higher there.
+The fitness landscape $F(x,y)$ that particles cannot directly observe. The dominant peak is in the upper-right region around $(0.8, 0.85)$, with secondary peaks scattered across the domain. Comparing with the bottom-left panel, the knowledge surface has begun to mirror the fitness landscape's structure — higher knowledge accumulates where fitness is higher — even though all particles are blind to $F$. This correlation emerges purely from the fitness ceiling constraint: particles can deposit more knowledge in high-fitness regions because the ceiling is higher there.
 
 ## Next Steps
 

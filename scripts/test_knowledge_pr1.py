@@ -11,7 +11,7 @@ dependencies.  Verifies:
 3. Fitness ceiling is enforced
 4. Structural support constraint works
 5. Decay and diffusion work
-6. Visionary particles drift toward the global peak
+6. Full simulation: knowledge grows and correlates with fitness
 7. Timing: ~5 min experiment at 60fps = ~18,000 steps
 
 Generates a diagnostic plot to results/pr1_verification.png
@@ -67,7 +67,6 @@ def test_landscape():
     # Test gradient
     grad = landscape.gradient(peak_pos)
     print(f"  Gradient at peak: ({grad[0, 0]:.4f}, {grad[0, 1]:.4f})")
-    # Gradient should be near zero at the peak
     assert np.linalg.norm(grad) < 1.0, "Gradient should be small near peak"
     print("  PASS: Gradient is small at peak")
 
@@ -115,7 +114,6 @@ def test_structural_support():
     """Test that the structural support constraint prevents thin spires."""
     kf = KnowledgeField(grid_res=32, diffusion_sigma=0.0, decay=1.0,
                          support_radius=3, max_slope=0.1)
-    # No fitness ceiling (set very high)
     kf._fitness_grid = np.ones((32, 32), dtype=np.float64)
 
     # Deposit a lot at one point
@@ -126,8 +124,6 @@ def test_structural_support():
 
     cx, cy = kf._pos_to_cell(x, y)
     center_h = kf.grid[cx[0], cy[0]]
-    # With max_slope=0.1 and support_radius=3, the center can only be
-    # 0.1 above the local mean, which is limited by the base
     print(f"  Center height after 100 deposits: {center_h:.4f}")
     assert center_h < 0.5, "Support constraint should limit thin spires"
     print("  PASS: Structural support limits thin spires")
@@ -156,7 +152,12 @@ def test_decay_and_diffusion():
 
 
 def test_full_simulation(n_steps=18000, n_particles=300):
-    """Simulate the full knowledge accumulation process.
+    """Simulate knowledge accumulation with random-walking particles.
+
+    All particles are identical (no visionaries). They deposit knowledge
+    at their spatial positions while doing a random walk. The knowledge
+    field should grow, respect the fitness ceiling, and show higher
+    values in high-fitness regions.
 
     Returns history arrays for diagnostic plotting.
     """
@@ -172,10 +173,6 @@ def test_full_simulation(n_steps=18000, n_particles=300):
     # Initialize particles uniformly
     pos = rng.uniform(0, SPACE, (n_particles, 3))
 
-    # First n_vis are visionaries
-    vis_frac = 0.02
-    n_vis = max(1, int(vis_frac * n_particles))
-    vis_nudge = 0.001
     write_rate = 0.005
     step_size = 0.003
 
@@ -184,11 +181,6 @@ def test_full_simulation(n_steps=18000, n_particles=300):
     hist_steps = []
     hist_coverage = []
     hist_peak = []
-    hist_vis_dist = []
-    hist_reg_dist = []
-
-    # Global peak location
-    peak_x, peak_y = 0.8, 0.85
 
     for step in range(n_steps):
         x = pos[:, 0]
@@ -197,17 +189,6 @@ def test_full_simulation(n_steps=18000, n_particles=300):
         # Deposit knowledge
         amounts = np.full(n_particles, write_rate, dtype=np.float64)
         kf.deposit(x, y, amounts)
-
-        # Visionary nudge
-        vis_mask = np.zeros(n_particles, dtype=bool)
-        vis_mask[:n_vis] = True
-        probes = np.column_stack([x[vis_mask], y[vis_mask]])
-        vis_grad = landscape.gradient(probes)
-        mag = np.linalg.norm(vis_grad, axis=1, keepdims=True)
-        mag = np.maximum(mag, 1e-10)
-        vis_dir = vis_grad / mag
-        pos[vis_mask, 0] = (pos[vis_mask, 0] + vis_nudge * vis_dir[:, 0]) % SPACE
-        pos[vis_mask, 1] = (pos[vis_mask, 1] + vis_nudge * vis_dir[:, 1]) % SPACE
 
         # Random walk for all particles (simulating base physics)
         noise = rng.normal(0, step_size, (n_particles, 3))
@@ -222,18 +203,8 @@ def test_full_simulation(n_steps=18000, n_particles=300):
             hist_coverage.append(kf.coverage())
             hist_peak.append(kf.peak_knowledge())
 
-            # Distance to global peak
-            vis_d = np.sqrt((pos[vis_mask, 0] - peak_x)**2 +
-                            (pos[vis_mask, 1] - peak_y)**2)
-            reg_d = np.sqrt((pos[~vis_mask, 0] - peak_x)**2 +
-                            (pos[~vis_mask, 1] - peak_y)**2)
-            hist_vis_dist.append(vis_d.mean())
-            hist_reg_dist.append(reg_d.mean())
-
     print(f"  Final coverage: {kf.coverage():.1%}")
     print(f"  Final peak:     {kf.peak_knowledge():.3f}")
-    print(f"  Vis mean dist to peak:  {hist_vis_dist[-1]:.3f}")
-    print(f"  Reg mean dist to peak:  {hist_reg_dist[-1]:.3f}")
 
     # Assertions
     assert kf.coverage() > 0.1, f"Coverage should be >10%, got {kf.coverage():.1%}"
@@ -242,19 +213,21 @@ def test_full_simulation(n_steps=18000, n_particles=300):
     assert kf.peak_knowledge() > 0.3, f"Peak should be >0.3, got {kf.peak_knowledge():.3f}"
     print("  PASS: Peak knowledge > 0.3")
 
-    vis_drift = hist_vis_dist[0] - hist_vis_dist[-1]
-    reg_drift = hist_reg_dist[0] - hist_reg_dist[-1]
-    print(f"  Visionary drift toward peak: {vis_drift:.3f}")
-    print(f"  Regular drift toward peak:   {reg_drift:.3f}")
-    assert vis_drift > reg_drift, "Visionaries should drift more toward peak"
-    print("  PASS: Visionaries drift more toward peak than regulars")
+    # Check that knowledge correlates with fitness (high-fitness regions
+    # should have higher knowledge because the ceiling allows it)
+    fitness_grid = kf._fitness_grid
+    knowledge_grid = kf.grid
+    # Flatten and compute correlation
+    corr = np.corrcoef(fitness_grid.ravel(), knowledge_grid.ravel())[0, 1]
+    print(f"  Knowledge-fitness correlation: {corr:.3f}")
+    assert corr > 0.0, "Knowledge should positively correlate with fitness"
+    print("  PASS: Knowledge correlates with fitness")
 
     return (np.array(hist_steps), np.array(hist_coverage),
-            np.array(hist_peak), np.array(hist_vis_dist),
-            np.array(hist_reg_dist), kf)
+            np.array(hist_peak), kf)
 
 
-def generate_diagnostic_plot(steps, coverage, peak, vis_dist, reg_dist, kf):
+def generate_diagnostic_plot(steps, coverage, peak, kf):
     """Generate a diagnostic plot."""
     import matplotlib
     matplotlib.use('Agg')
@@ -273,21 +246,28 @@ def generate_diagnostic_plot(steps, coverage, peak, vis_dist, reg_dist, kf):
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # Visionary vs regular drift
+    # Knowledge vs fitness scatter
     ax = axes[0, 1]
-    ax.plot(steps, vis_dist, 'r-', label='Visionaries', linewidth=2)
-    ax.plot(steps, reg_dist, 'b-', label='Regulars', linewidth=2)
-    ax.set_xlabel('Step')
-    ax.set_ylabel('Mean dist to peak')
-    ax.set_title('Drift Toward Global Peak')
+    fitness_flat = kf._fitness_grid.ravel()
+    knowledge_flat = kf.grid.ravel()
+    # Only plot cells with some knowledge
+    mask = knowledge_flat > 0.01
+    ax.scatter(fitness_flat[mask], knowledge_flat[mask], alpha=0.3, s=4, c='steelblue')
+    ax.plot([0, 1], [0, 1], 'r--', alpha=0.5, label='ceiling (M = F)')
+    ax.set_xlabel('Fitness F(x,y)')
+    ax.set_ylabel('Knowledge M(x,y)')
+    ax.set_title('Knowledge vs Fitness (per cell)')
     ax.legend()
     ax.grid(True, alpha=0.3)
+    corr = np.corrcoef(fitness_flat, knowledge_flat)[0, 1]
+    ax.text(0.05, 0.92, f'r = {corr:.3f}', transform=ax.transAxes,
+            fontsize=12, fontweight='bold')
 
     # Knowledge surface
     ax = axes[1, 0]
     im = ax.imshow(kf.grid.T, origin='lower', extent=[0, 1, 0, 1],
                     cmap='YlGn', vmin=0, vmax=1)
-    ax.set_title('Final Knowledge Surface')
+    ax.set_title('Final Knowledge Surface M(x,y)')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     plt.colorbar(im, ax=ax)
@@ -297,7 +277,7 @@ def generate_diagnostic_plot(steps, coverage, peak, vis_dist, reg_dist, kf):
     if kf._fitness_grid is not None:
         im = ax.imshow(kf._fitness_grid.T, origin='lower', extent=[0, 1, 0, 1],
                         cmap='Blues', vmin=0, vmax=1)
-        ax.set_title('Hidden Fitness Landscape')
+        ax.set_title('Hidden Fitness Landscape F(x,y)')
         ax.set_xlabel('x')
         ax.set_ylabel('y')
         plt.colorbar(im, ax=ax)

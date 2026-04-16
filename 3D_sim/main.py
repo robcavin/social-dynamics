@@ -70,9 +70,6 @@ mountain_params = dict(
     decay=0.9999,                 # per-step decay (cf. memory_decay)
     support_radius=3,             # structural support neighbourhood (cells)
     max_slope=0.4,                # max height above local mean
-    # --- Visionary ---
-    visionary_fraction=0.02,      # fraction that sense hidden gradient
-    visionary_nudge=0.001,        # spatial drift strength for visionaries
     # --- Rendering ---
     show_ghost=True,
     ghost_alpha=0.15,
@@ -481,8 +478,8 @@ def main():
     def knowledge_step():
         """One step of knowledge field dynamics.
 
-        PR1 scope: deposit knowledge + visionary nudge.
-        No reward, no social learning changes.
+        PR1 scope: deposit knowledge, diffuse, decay.
+        No reward, no social learning changes, no visionary nudge.
         """
         if knowledge_field is None:
             return
@@ -496,26 +493,6 @@ def main():
         write_rate = mountain_params['knowledge_write_rate']
         amounts = np.full(n, write_rate, dtype=np.float64)
         knowledge_field.deposit(x, y, amounts)
-
-        # ── Visionary nudge (small spatial drift toward hidden gradient) ──
-        vis_frac = mountain_params['visionary_fraction']
-        vis_nudge = mountain_params['visionary_nudge']
-        n_vis = max(1, int(vis_frac * n))
-        vis_mask = np.zeros(n, dtype=bool)
-        vis_mask[:n_vis] = True  # First n_vis particles are visionaries
-
-        if vis_nudge > 0 and n_vis > 0:
-            probes = np.column_stack([x[vis_mask], y[vis_mask]])
-            vis_grad = landscape.gradient(probes)
-            mag = np.linalg.norm(vis_grad, axis=1, keepdims=True)
-            mag = np.maximum(mag, 1e-10)
-            vis_dir = vis_grad / mag
-            # Apply spatial nudge
-            from .grid3d import SPACE
-            sim.pos[vis_mask, 0] = (pos[vis_mask, 0] +
-                                     vis_nudge * vis_dir[:, 0]) % SPACE
-            sim.pos[vis_mask, 1] = (pos[vis_mask, 1] +
-                                     vis_nudge * vis_dir[:, 1]) % SPACE
 
         # ── Diffuse and decay the knowledge field ──
         knowledge_field.step()
@@ -1031,19 +1008,6 @@ def main():
                     mountain_params['max_slope'] = v
                     if knowledge_field is not None:
                         knowledge_field.max_slope = v
-
-                imgui.separator()
-                imgui.text("Visionary")
-                changed, v = imgui.drag_float(
-                    "Vis Fraction", mountain_params['visionary_fraction'],
-                    0.005, 0.0, 0.5, "%.3f")
-                if changed:
-                    mountain_params['visionary_fraction'] = v
-                changed, v = imgui.drag_float(
-                    "Vis Nudge", mountain_params['visionary_nudge'],
-                    0.0001, 0.0, 0.01, "%.4f")
-                if changed:
-                    mountain_params['visionary_nudge'] = v
 
                 imgui.separator()
                 imgui.text("Rendering")
