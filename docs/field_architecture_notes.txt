@@ -1,0 +1,42 @@
+SPATIAL MEMORY FIELD ARCHITECTURE ANALYSIS
+==========================================
+
+KEY FINDING: The spatial memory field is NOT a separate class.
+It is implemented as inline code within the Simulation.step() method in sim_2d_exp/simulation.py.
+
+The "field" is just a numpy array: self.memory_field = np.zeros((G, G, k), dtype=np.float64)
+
+Operations are all inline in step():
+- Read: lines 373-384 — maps pos to grid cells, samples field, modulates prefs
+- Write: lines 416-426 — np.add.at to deposit prefs into grid
+- Decay: line 429 — self.memory_field *= params['memory_decay']
+- Blur: lines 432-437 — per-channel gaussian_filter
+
+The 3D simulation (3D_sim/simulation3d.py) does NOT have spatial memory field support at all.
+It only has dir_memory (direction EMA), which is unrelated.
+
+IMPLICATIONS FOR KNOWLEDGE FIELD:
+1. There is no SpatialField base class to extend — the pattern is inline code.
+2. Two options:
+   a) Refactor: Extract a SpatialField base class from the 2D code, then subclass for Knowledge.
+      Pro: Clean architecture. Con: Large diff touching Richard's code.
+   b) New class: Write KnowledgeField as a standalone class that follows the same pattern.
+      Pro: Minimal diff to Richard's code. Con: Some code duplication.
+
+RECOMMENDATION: Option (b) — write a standalone KnowledgeField class that mirrors the
+spatial memory field pattern but as a proper class. This keeps the diff to Richard's
+code minimal (just the hook points in main.py). Later, if Richard wants, the spatial
+memory field could be refactored to use the same class pattern.
+
+For PR1 specifically, the KnowledgeField class needs:
+- __init__(grid_res, decay, blur_sigma, max_slope, support_radius)
+- set_fitness_ceiling(landscape) — precompute F(x,y) on the grid
+- deposit(positions, amounts) — accumulate + ceiling + support
+- step() — decay + blur + re-apply constraints
+- sample(positions) — read heights
+- coverage(), peak() — metrics
+
+Hook points in main.py (3D sim):
+- After sim.step(): call knowledge_field.deposit() and knowledge_field.step()
+- Rendering: use knowledge grid for mesh visualization
+- No changes to simulation3d.py itself in PR1

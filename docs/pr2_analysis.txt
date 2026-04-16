@@ -1,0 +1,74 @@
+PR2 Social Learning Modification Points
+========================================
+
+The social learning step appears in THREE physics engines:
+
+1. PyTorch (_step_torch) - lines 177-194 and 256-273
+2. NumPy (step() method) - lines 724-741
+3. Numba (_step_inner_prod_avg / _step_per_dim) - external functions
+
+The social learning pattern is the same everywhere:
+  if social > 0:
+      nbr_prefs = prefs[nbr_ids]
+      if social_dist_weight:
+          # distance-weighted mean
+          w = 1.0 / (d + 1e-6)
+          nbr_mean = (nbr_prefs * w[:,:,None]).sum(dim=1)
+      else:
+          # unweighted mean
+          nbr_mean = nbr_prefs.mean(dim=1)
+      new_prefs = (1 - social) * prefs + social * nbr_mean
+
+KEY INSIGHT: The modification is to add reward weights to the neighbor mean.
+Instead of equal weights (or distance-only weights), multiply by (1 + rho * R_j)
+where R_j is the reward of neighbor j.
+
+APPROACH: Rather than modifying all three physics engines (invasive),
+we can apply the reward-weighted social nudge as a POST-STEP correction
+in main.py's knowledge_step(). This is:
+  1. Less invasive (no changes to simulation3d.py at all)
+  2. Cleanly gated behind mountain_params['enabled']
+  3. Easier to explain and test
+
+The post-step approach:
+  After sim.step(), in knowledge_step():
+  1. Read rewards for all particles from knowledge field
+  2. For each particle, compute reward-weighted neighbor mean of prefs
+  3. Apply a small social nudge: prefs += nudge_rate * (weighted_mean - prefs)
+
+This is equivalent to adding a second social learning pass with reward weights.
+The base social learning (uniform or distance-weighted) still runs normally.
+The reward-weighted pass is an additional pull toward high-reward neighbors.
+
+ALTERNATIVE: Modify simulation3d.py to accept an optional reward_weights array.
+  Pros: single social learning pass, more elegant
+  Cons: touches Richard's core code, needs changes in 3 physics engines
+
+DECISION: Go with the post-step approach for PR2. It's additive, testable,
+and doesn't touch simulation3d.py. If performance matters later, we can
+refactor into the physics engine.
+
+Actually wait - let me reconsider. The integration plan says PR2 modifies
+simulation3d.py. And the user wants minimal, clean changes. The cleanest
+approach is to add an optional `reward_weights` parameter to the Simulation
+class that gets used in the social learning step. This way:
+  - simulation3d.py gets one clean change
+  - The change is clearly documented
+  - All three physics engines benefit
+
+Let me look at how to do this minimally.
+
+The simplest change: add sim.reward_weights = None (default).
+In the social learning section, if reward_weights is not None:
+  w_r = reward_weights[nbr_ids]  # (N, n_nbr)
+  # multiply into the neighbor mean computation
+  
+For the unweighted case:
+  nbr_mean = nbr_prefs.mean(dim=1)
+becomes:
+  w = reward_weights[nbr_ids]  # (N, n_nbr)
+  w = w / w.sum(dim=1, keepdim=True)
+  nbr_mean = (nbr_prefs * w.unsqueeze(2)).sum(dim=1)
+
+This is clean and minimal. One new attribute, one conditional in each
+social learning block.

@@ -110,8 +110,13 @@ def _step_torch(pos_np, prefs_np, dm_np, nbr_ids_np, valid_np,
                 L, k, step_size, repulsion, dir_memory,
                 social, social_dist_weight,
                 pref_weighted, pref_inner, inner_avg,
-                pref_dist_w, pref_dist_sigma, best_mag):
-    """Full physics step using PyTorch vectorized ops (3D)."""
+                pref_dist_w, pref_dist_sigma, best_mag,
+                signals_np=None):
+    """Full physics step using PyTorch vectorized ops (3D).
+
+    When *signals_np* is provided, social learning reads neighbour
+    **signals** instead of raw prefs (signal / response split).
+    """
     prec = params['torch_precision']
     dtype_name = _TORCH_DTYPES.get(prec, 'float32')
     dtype = getattr(torch, dtype_name)
@@ -135,6 +140,10 @@ def _step_torch(pos_np, prefs_np, dm_np, nbr_ids_np, valid_np,
 
     pos = torch.tensor(pos_np, dtype=dtype, device=device)
     prefs = torch.tensor(prefs_np, dtype=torch.float32, device=device)
+    if signals_np is not None:
+        signals = torch.tensor(signals_np, dtype=torch.float32, device=device)
+    else:
+        signals = prefs
     dm = torch.tensor(dm_np, dtype=dtype, device=device)
     nbr_ids = torch.tensor(nbr_ids_np.astype(np.int64), device=device)
     if has_mask:
@@ -175,7 +184,7 @@ def _step_torch(pos_np, prefs_np, dm_np, nbr_ids_np, valid_np,
 
         new_prefs = prefs.clone()
         if social > 0:
-            nbr_prefs = prefs[nbr_ids]
+            nbr_sigs = signals[nbr_ids]  # read neighbour SIGNALS
             if social_dist_weight:
                 d = dists.squeeze(2)
                 w = 1.0 / (d + 1e-6)
@@ -183,13 +192,13 @@ def _step_torch(pos_np, prefs_np, dm_np, nbr_ids_np, valid_np,
                     w = w * valid.to(dtype)
                 w_sum = w.sum(dim=1, keepdim=True).clamp(min=1e-10)
                 w = w / w_sum
-                nbr_mean = (nbr_prefs * w.unsqueeze(2)).sum(dim=1)
+                nbr_mean = (nbr_sigs * w.unsqueeze(2)).sum(dim=1)
             else:
                 if has_mask:
-                    nbr_prefs_m = nbr_prefs * valid.unsqueeze(2).float()
-                    nbr_mean = nbr_prefs_m.sum(dim=1) / n_valid.unsqueeze(1)
+                    nbr_sigs_m = nbr_sigs * valid.unsqueeze(2).float()
+                    nbr_mean = nbr_sigs_m.sum(dim=1) / n_valid.unsqueeze(1)
                 else:
-                    nbr_mean = nbr_prefs.mean(dim=1)
+                    nbr_mean = nbr_sigs.mean(dim=1)
             new_prefs = (1.0 - social) * prefs + social * nbr_mean
             new_prefs = new_prefs.clamp(-1, 1)
 
@@ -254,7 +263,7 @@ def _step_torch(pos_np, prefs_np, dm_np, nbr_ids_np, valid_np,
 
     new_prefs = prefs.clone()
     if social > 0:
-        nbr_prefs = prefs[nbr_ids]
+        nbr_sigs = signals[nbr_ids]  # read neighbour SIGNALS
         if social_dist_weight:
             d = dists.squeeze(2)
             w = 1.0 / (d + 1e-6)
@@ -262,13 +271,13 @@ def _step_torch(pos_np, prefs_np, dm_np, nbr_ids_np, valid_np,
                 w = w * valid.to(dtype)
             w_sum = w.sum(dim=1, keepdim=True).clamp(min=1e-10)
             w = w / w_sum
-            nbr_mean = (nbr_prefs * w.unsqueeze(2)).sum(dim=1)
+            nbr_mean = (nbr_sigs * w.unsqueeze(2)).sum(dim=1)
         else:
             if has_mask:
-                nbr_prefs_m = nbr_prefs * valid.unsqueeze(2).float()
-                nbr_mean = nbr_prefs_m.sum(dim=1) / n_valid.unsqueeze(1)
+                nbr_sigs_m = nbr_sigs * valid.unsqueeze(2).float()
+                nbr_mean = nbr_sigs_m.sum(dim=1) / n_valid.unsqueeze(1)
             else:
-                nbr_mean = nbr_prefs.mean(dim=1)
+                nbr_mean = nbr_sigs.mean(dim=1)
         new_prefs = (1.0 - social) * prefs + social * nbr_mean
         new_prefs = new_prefs.clamp(-1, 1)
 
@@ -296,6 +305,7 @@ class Simulation:
         pos_dtype = np.float64 if params['use_f64'] else np.float32
         self.pos = np.zeros((n, 3), dtype=pos_dtype)
         self.prefs = np.zeros((n, k), dtype=np.float32)
+        self.signals = None  # Optional broadcast signal; when None, prefs are used
         self.dir_matrix = np.zeros((n, k, 3), np.float64 if params['use_f64'] else np.float32)
         self._movement = np.zeros((n, 3), np.float64 if params['use_f64'] else np.float32)
         self.step_count = 0
@@ -610,6 +620,7 @@ class Simulation:
 
     def step(self, reuse_neighbors=False):
         pos, prefs, dm = self.pos, self.prefs, self.dir_matrix
+        signals = self.signals if self.signals is not None else prefs
         n = len(pos)
         k = self.k
         n_nbr = min(params['n_neighbors'], n - 1)
@@ -722,7 +733,7 @@ class Simulation:
             self.pos = (pos + step_size * movement) % SPACE
 
             if social > 0:
-                nbr_prefs = prefs[nbr_ids]
+                nbr_prefs = signals[nbr_ids]  # read neighbor SIGNALS (not prefs)
                 if params['social_dist_weight']:
                     d = dists[:, :, 0]
                     w = 1.0 / (d + 1e-6)
@@ -746,12 +757,14 @@ class Simulation:
             return
 
         if params['physics_engine'] == 2 and _HAS_TORCH:
+            sig_np = signals if signals is not prefs else None
             new_pos, new_prefs, new_dm, mov = _step_torch(
                 pos, prefs, dm, nbr_ids, valid,
                 SPACE, k, step_size, repulsion, dir_memory,
                 social, params['social_dist_weight'],
                 pref_weighted, pref_inner, inner_avg,
-                pref_dist_w, pref_dist_sigma, best_mag)
+                pref_dist_w, pref_dist_sigma, best_mag,
+                signals_np=sig_np)
             self.pos = new_pos.astype(pos.dtype)
             self.prefs = new_prefs
             self.dir_matrix = new_dm.astype(dm.dtype)
@@ -762,6 +775,7 @@ class Simulation:
             return
 
         # Numba physics path
+        sig_f64 = signals.astype(np.float64) if signals is not prefs else None
         if inner_avg:
             if valid is None:
                 valid_arr = np.ones((n, nbr_ids.shape[1]), dtype=np.bool_)
@@ -771,7 +785,8 @@ class Simulation:
             new_pos, new_prefs, mov = _step_inner_prod_avg(
                 pos, prefs_f64, nbr_ids.astype(np.int64), valid_arr,
                 SPACE, k, step_size, repulsion, social,
-                params['social_dist_weight'], pref_dist_w, pref_dist_sigma)
+                params['social_dist_weight'], pref_dist_w, pref_dist_sigma,
+                signals=sig_f64)
             self.pos = new_pos
             self.prefs = new_prefs.astype(np.float32)
             self._movement = mov
@@ -786,7 +801,8 @@ class Simulation:
                 SPACE, k, step_size, repulsion, social,
                 params['social_dist_weight'], dir_memory,
                 pref_weighted, pref_inner,
-                pref_dist_w, pref_dist_sigma, best_mag)
+                pref_dist_w, pref_dist_sigma, best_mag,
+                signals=sig_f64)
             self.pos = new_pos
             self.prefs = new_prefs.astype(np.float32)
             self.dir_matrix = new_dm

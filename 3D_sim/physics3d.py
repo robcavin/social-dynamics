@@ -4,6 +4,12 @@
 
 All position/direction vectors are (n, 3).
 All distances use dx² + dy² + dz² with toroidal wrapping.
+
+Signal / response split
+-----------------------
+Both kernels accept an optional *signals* array (same shape as *prefs*).
+When provided, social learning reads neighbour **signals** instead of raw
+prefs.  Movement compatibility still uses the particle's own *prefs*.
 """
 
 import numpy as np
@@ -13,12 +19,20 @@ from numba import njit, prange
 @njit(parallel=True)
 def _step_inner_prod_avg(pos, prefs, nbr_ids, valid, L, k,
                          step_size, repulsion, social, social_dist_weight,
-                         pref_dist_weight, pref_dist_sigma):
+                         pref_dist_weight, pref_dist_sigma,
+                         signals=None):
     n = pos.shape[0]
     n_nbr = nbr_ids.shape[1]
     new_pos = np.empty((n, 3), dtype=np.float64)
     new_prefs = np.empty((n, k), dtype=np.float64)
     movement = np.empty((n, 3), dtype=np.float64)
+
+    # Resolve signal source for social learning
+    use_signals = signals is not None
+    if not use_signals:
+        sig = prefs  # fallback: read prefs directly
+    else:
+        sig = signals
 
     for i in prange(n):
         mx, my, mz = 0.0, 0.0, 0.0
@@ -93,7 +107,7 @@ def _step_inner_prod_avg(pos, prefs, nbr_ids, valid, L, k,
                     w = 1.0 / (dd + 1e-6)
                     w_total += w
                     for d in range(k):
-                        new_prefs[i, d] += w * prefs[nj, d]
+                        new_prefs[i, d] += w * sig[nj, d]
                 if w_total > 1e-10:
                     for d in range(k):
                         new_prefs[i, d] /= w_total
@@ -108,7 +122,7 @@ def _step_inner_prod_avg(pos, prefs, nbr_ids, valid, L, k,
                     cnt = 0
                     for j in range(n_nbr):
                         if valid[i, j]:
-                            s += prefs[nbr_ids[i, j], d]
+                            s += sig[nbr_ids[i, j], d]
                             cnt += 1
                     if cnt > 0:
                         mean_p = s / cnt
@@ -127,13 +141,21 @@ def _step_inner_prod_avg(pos, prefs, nbr_ids, valid, L, k,
 def _step_per_dim(pos, prefs, dir_matrix, nbr_ids, valid, L, k,
                   step_size, repulsion, social, social_dist_weight,
                   dir_memory, pref_weighted, pref_inner,
-                  pref_dist_weight, pref_dist_sigma, best_by_magnitude):
+                  pref_dist_weight, pref_dist_sigma, best_by_magnitude,
+                  signals=None):
     n = pos.shape[0]
     n_nbr = nbr_ids.shape[1]
     new_pos = np.empty((n, 3), dtype=np.float64)
     new_prefs = np.empty((n, k), dtype=np.float64)
     new_dm = np.empty((n, k, 3), dtype=np.float64)
     movement = np.empty((n, 3), dtype=np.float64)
+
+    # Resolve signal source for social learning
+    use_signals = signals is not None
+    if not use_signals:
+        sig = prefs
+    else:
+        sig = signals
 
     for i in prange(n):
         mx, my, mz = 0.0, 0.0, 0.0
@@ -278,7 +300,7 @@ def _step_per_dim(pos, prefs, dir_matrix, nbr_ids, valid, L, k,
                     w = 1.0 / (dd + 1e-6)
                     w_total += w
                     for d in range(k):
-                        new_prefs[i, d] += w * prefs[nj, d]
+                        new_prefs[i, d] += w * sig[nj, d]
                 if w_total > 1e-10:
                     for d in range(k):
                         new_prefs[i, d] /= w_total
@@ -293,7 +315,7 @@ def _step_per_dim(pos, prefs, dir_matrix, nbr_ids, valid, L, k,
                     cnt = 0
                     for j in range(n_nbr):
                         if valid[i, j]:
-                            s += prefs[nbr_ids[i, j], d]
+                            s += sig[nbr_ids[i, j], d]
                             cnt += 1
                     if cnt > 0:
                         mean_p = s / cnt

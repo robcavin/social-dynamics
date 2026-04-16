@@ -1,0 +1,34 @@
+BASE MODEL ARCHITECTURE NOTES
+=============================
+
+Key finding: The spatial memory field described in Richard's PDF (Section 8)
+is NOT yet implemented in the 3D codebase. The 3D sim has:
+- Positions: pos (n, 3) in [0, SPACE)^3 where SPACE=1.0
+- Preferences: prefs (n, k) in [-1, 1]
+- Direction memory: dir_matrix (n, k, 3) — EMA of movement directions
+- Neighbor finding: KNN or radius-based on spatial positions
+- Physics: per-dimension best-neighbor or inner-product-average
+- Social learning: prefs shift toward neighbor mean (line 740)
+- Trail rendering: visual only, not used in physics
+
+The simulation loop (step()) does:
+1. Find neighbors (KNN/radius on spatial positions)
+2. Physics: compute movement from preference-weighted neighbor directions
+3. Position update: pos = (pos + step_size * movement) % SPACE
+4. Social learning: prefs blend toward neighbor mean
+5. Clip prefs to [-1, 1]
+
+HOOK POINTS for Knowledge Manifold:
+- After step 3 (position update): deposit knowledge at new positions
+- Between step 1 and 2: read knowledge heights, compute rewards
+- In step 4 (social learning): weight by reward
+- New: visionary spatial drift added to movement in step 3
+
+The 3D domain is [0,1)^3 but we can use (x,y) as the skill plane
+and z as the vertical axis for visualization.
+
+CRITICAL: The base model uses 3D positions. For the knowledge manifold,
+the "skill space" is naturally the (x,y) plane of the spatial domain.
+The z-axis can represent the knowledge height for visualization.
+This means particles literally "walk on the mountain" — their z-position
+IS their knowledge height.

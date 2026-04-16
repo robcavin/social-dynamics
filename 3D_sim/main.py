@@ -70,6 +70,10 @@ mountain_params = dict(
     decay=0.9999,                 # per-step decay (cf. memory_decay)
     support_radius=3,             # structural support neighbourhood (cells)
     max_slope=0.4,                # max height above local mean
+    # --- Reward-modulated signals (PR2) ---
+    reward_exp_scale=3.0,         # alpha in exp(alpha * h)
+    reward_ema_tau=0.95,          # EMA smoothing for reward
+    signal_rho=1.0,               # signal amplification: s = p * (1 + rho * R)
     # --- Rendering ---
     show_ghost=True,
     ghost_alpha=0.15,
@@ -380,6 +384,8 @@ def main():
             knowledge_field.diffusion_sigma = mountain_params['diffusion_sigma']
             knowledge_field.decay = mountain_params['decay']
             knowledge_field.max_slope = mountain_params['max_slope']
+        reward_ema = None
+        sim.signals = None
         trail_fbo.use()
         ctx.clear(0, 0, 0)
         trail_fbo2.use()
@@ -393,6 +399,7 @@ def main():
     # ── Mountain mode state ──
     knowledge_field = None
     landscape = None
+    reward_ema = None  # (N,) EMA-smoothed reward per particle
     _mountain_rng = np.random.default_rng(123)
 
     # Mountain mesh GPU buffers (initialised lazily)
@@ -475,11 +482,59 @@ def main():
                 (vbo_g_col, '3f', 'in_color'),
             ], index_buffer=ibo_ghost)
 
-    def knowledge_step():
-        """One step of knowledge field dynamics.
+    def compute_signals():
+        """Compute reward-modulated broadcast signals (before sim.step).
 
-        PR1 scope: deposit knowledge, diffuse, decay.
-        No reward, no social learning changes, no visionary nudge.
+        Implements the signal / response split:
+          signal_i = prefs_i * (1 + rho * R_i)
+
+        where R_i is the EMA-smoothed, exponentially-scaled knowledge
+        height at particle i's position.  High-knowledge particles
+        broadcast a stronger signal, making them more socially
+        influential without changing the social learning rule itself.
+        """
+        nonlocal reward_ema
+        if knowledge_field is None:
+            sim.signals = None
+            return
+
+        pos = sim.pos
+        n = len(pos)
+        x = pos[:, 0].astype(np.float64)
+        y = pos[:, 1].astype(np.float64)
+
+        # ── Sample knowledge height ──
+        heights = knowledge_field.sample(x, y)  # [0, 1]
+
+        # ── Exponentially-scaled reward ──
+        alpha = mountain_params['reward_exp_scale']
+        raw = np.exp(alpha * heights)
+        # Normalise to [0, 1]: (exp(a*h) - 1) / (exp(a) - 1)
+        denom = np.exp(alpha) - 1.0
+        if denom > 1e-12:
+            rewards = (raw - 1.0) / denom
+        else:
+            rewards = heights  # linear fallback when alpha ≈ 0
+
+        # ── EMA smoothing ──
+        tau = mountain_params['reward_ema_tau']
+        if reward_ema is None or len(reward_ema) != n:
+            reward_ema = rewards.copy()
+        else:
+            reward_ema[:] = tau * reward_ema + (1.0 - tau) * rewards
+
+        # ── Amplify signals ──
+        rho = mountain_params['signal_rho']
+        if rho > 0:
+            amplification = (1.0 + rho * reward_ema)[:, None]  # (N, 1)
+            sim.signals = (sim.prefs * amplification).astype(sim.prefs.dtype)
+        else:
+            sim.signals = None  # no amplification, use raw prefs
+
+    def knowledge_deposit():
+        """Deposit knowledge and update the field (after sim.step).
+
+        PR1: deposit, diffuse, decay, project particles onto surface.
         """
         if knowledge_field is None:
             return
@@ -557,10 +612,15 @@ def main():
             spf = params['steps_per_frame']
             reuse = params['reuse_neighbors']
             for sub in range(spf):
-                sim.step(reuse_neighbors=(reuse and sub > 0))
-                # Knowledge field step (mountain mode)
+                # Compute reward-modulated signals (before physics)
                 if mountain_params['enabled'] and knowledge_field is not None:
-                    knowledge_step()
+                    compute_signals()
+                sim.step(reuse_neighbors=(reuse and sub > 0))
+                # Clear signals after physics (don't persist stale data)
+                sim.signals = None
+                # Knowledge field deposit + diffuse (after physics)
+                if mountain_params['enabled'] and knowledge_field is not None:
+                    knowledge_deposit()
         t_sim = time.perf_counter() - t0
 
         # ── Update mountain mesh (every frame) ──
@@ -1008,6 +1068,27 @@ def main():
                     mountain_params['max_slope'] = v
                     if knowledge_field is not None:
                         knowledge_field.max_slope = v
+
+                imgui.separator()
+                imgui.text("Reward / Signal (PR2)")
+                changed, v = imgui.drag_float(
+                    "Exp Scale", mountain_params['reward_exp_scale'],
+                    0.05, 0.0, 10.0, "%.2f")
+                if changed:
+                    mountain_params['reward_exp_scale'] = v
+                changed, v = imgui.drag_float(
+                    "EMA Tau", mountain_params['reward_ema_tau'],
+                    0.005, 0.0, 1.0, "%.3f")
+                if changed:
+                    mountain_params['reward_ema_tau'] = v
+                changed, v = imgui.drag_float(
+                    "Signal Rho", mountain_params['signal_rho'],
+                    0.05, 0.0, 10.0, "%.2f")
+                if changed:
+                    mountain_params['signal_rho'] = v
+                # Show mean reward for diagnostics
+                if reward_ema is not None:
+                    imgui.text(f"Mean reward: {reward_ema.mean():.3f}  Max: {reward_ema.max():.3f}")
 
                 imgui.separator()
                 imgui.text("Rendering")
