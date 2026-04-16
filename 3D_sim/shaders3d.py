@@ -5,6 +5,8 @@ GLSL Shaders for 3D Particle Simulation
 PARTICLE_VERT: 3D particle positions → MVP projection with perspective point size
 BOX_VERT: 3D wireframe cube via MVP
 OVERLAY_VERT: 2D overlay (divider line) — maps vec2 directly to NDC
+MESH_VERT/MESH_FRAG: Lit triangle mesh for knowledge surface
+GHOST_VERT/GHOST_FRAG: Wireframe ghost for hidden fitness surface
 Screen-space shaders (QUAD_VERT, TRAIL_FRAG, SPLAT_FRAG, DISPLAY_FRAG) unchanged from 2D.
 """
 
@@ -141,5 +143,64 @@ out vec4 fragColor;
 uniform vec4 line_color;
 void main() {
     fragColor = line_color;
+}
+'''
+
+# ── Mountain mode shaders ─────────────────────────────────────────
+
+MESH_VERT = '''
+#version 410 core
+in vec3 in_pos;
+in vec3 in_normal;
+in vec3 in_color;
+out vec3 v_color;
+out vec3 v_normal;
+uniform mat4 mvp;
+
+void main() {
+    gl_Position = mvp * vec4(in_pos, 1.0);
+    v_color = in_color;
+    v_normal = in_normal;
+}
+'''
+
+MESH_FRAG = '''
+#version 410 core
+in vec3 v_color;
+in vec3 v_normal;
+out vec4 fragColor;
+uniform float alpha;
+
+void main() {
+    // Simple directional lighting from above-right
+    vec3 light_dir = normalize(vec3(0.3, 1.0, 0.5));
+    float diffuse = max(dot(normalize(v_normal), light_dir), 0.0);
+    float ambient = 0.3;
+    vec3 lit = v_color * (ambient + (1.0 - ambient) * diffuse);
+    fragColor = vec4(lit, alpha);
+}
+'''
+
+GHOST_VERT = '''
+#version 410 core
+in vec3 in_pos;
+in vec3 in_color;
+out vec3 v_color;
+uniform mat4 mvp;
+
+void main() {
+    gl_Position = mvp * vec4(in_pos, 1.0);
+    v_color = in_color;
+}
+'''
+
+GHOST_FRAG = '''
+#version 410 core
+in vec3 v_color;
+out vec4 fragColor;
+uniform float alpha;
+
+void main() {
+    fragColor = vec4(v_color, alpha);
 }
 '''

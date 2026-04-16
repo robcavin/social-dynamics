@@ -42,6 +42,8 @@ from .shaders3d import (
     BOX_VERT, BOX_FRAG,
     LINE_VERT, LINE_FRAG,
     OVERLAY_VERT, OVERLAY_FRAG,
+    MESH_VERT, MESH_FRAG,
+    GHOST_VERT, GHOST_FRAG,
 )
 from .camera3d import OrbitCamera
 from .simulation3d import (
@@ -56,8 +58,44 @@ from .physics3d import _step_inner_prod_avg, _step_per_dim
 
 WINDOW_W, WINDOW_H = 0, 0
 
+# ── Mountain mode parameters ────────────────────────────────────────
+# PR1: Knowledge field (environment only, no physics changes)
+mountain_params = dict(
+    enabled=False,
+    z_scale=0.5,
+    grid_res=64,
+    # --- Knowledge field (sibling of spatial memory field) ---
+    knowledge_write_rate=0.005,   # deposit per step (cf. memory_write_rate)
+    diffusion_sigma=0.5,          # Gaussian blur sigma (cf. memory_blur_sigma)
+    decay=0.9999,                 # per-step decay (cf. memory_decay)
+    support_radius=3,             # structural support neighbourhood (cells)
+    max_slope=0.4,                # max height above local mean
+    # --- Visionary ---
+    visionary_fraction=0.02,      # fraction that sense hidden gradient
+    visionary_nudge=0.001,        # spatial drift strength for visionaries
+    # --- Rendering ---
+    show_ghost=True,
+    ghost_alpha=0.15,
+    knowledge_alpha=0.7,
+)
+
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mountain', action='store_true',
+                        help='Enable knowledge manifold mountain mode')
+    args, _ = parser.parse_known_args()
+
+    if args.mountain:
+        mountain_params['enabled'] = True
+        # Good defaults for mountain mode
+        params['k'] = 3
+        params['social'] = 0.01
+        params['step_size'] = 0.003
+        params['inner_prod_avg'] = True
+        params['num_particles'] = 500
+
     # ── Initialize GLFW ──
     if not glfw.init():
         raise RuntimeError("Failed to initialize GLFW")
@@ -339,6 +377,12 @@ def main():
             params['neighbor_radius'] = ref['radius'] * scale
         sim.reset()
         rebuild_buffers()
+        # Reset knowledge field if mountain mode is on
+        if mountain_params['enabled'] and knowledge_field is not None:
+            knowledge_field.reset()
+            knowledge_field.diffusion_sigma = mountain_params['diffusion_sigma']
+            knowledge_field.decay = mountain_params['decay']
+            knowledge_field.max_slope = mountain_params['max_slope']
         trail_fbo.use()
         ctx.clear(0, 0, 0)
         trail_fbo2.use()
@@ -348,6 +392,140 @@ def main():
         vel_fbo2.use()
         ctx.clear(0, 0, 0)
         running_sim = True
+
+    # ── Mountain mode state ──
+    knowledge_field = None
+    landscape = None
+    _mountain_rng = np.random.default_rng(123)
+
+    # Mountain mesh GPU buffers (initialised lazily)
+    prog_mesh = None
+    vao_mesh = None
+    mesh_n_indices = 0
+    prog_ghost = None
+    vao_ghost = None
+    ghost_n_indices = 0
+
+    def build_mountain():
+        """Initialise the knowledge field and hidden fitness landscape."""
+        nonlocal knowledge_field, landscape
+        nonlocal prog_mesh, prog_ghost
+        from .knowledge_field import KnowledgeField
+        from .landscape import make_default_landscape
+
+        landscape = make_default_landscape(seed=42)
+        G = mountain_params['grid_res']
+        knowledge_field = KnowledgeField(
+            grid_res=G,
+            diffusion_sigma=mountain_params['diffusion_sigma'],
+            decay=mountain_params['decay'],
+            support_radius=mountain_params['support_radius'],
+            max_slope=mountain_params['max_slope'],
+        )
+        knowledge_field.set_fitness_surface(landscape)
+        print(f"Mountain mode: landscape built, grid {G}x{G}")
+
+        # Compile mesh shaders (once)
+        if prog_mesh is None:
+            prog_mesh = ctx.program(vertex_shader=MESH_VERT,
+                                    fragment_shader=MESH_FRAG)
+        if prog_ghost is None:
+            prog_ghost = ctx.program(vertex_shader=GHOST_VERT,
+                                     fragment_shader=GHOST_FRAG)
+
+    def rebuild_mountain_mesh():
+        """Regenerate the knowledge surface and ghost wireframe meshes."""
+        nonlocal vao_mesh, mesh_n_indices
+        nonlocal vao_ghost, ghost_n_indices
+
+        if knowledge_field is None:
+            return
+
+        from .mountain_mesh import (
+            generate_surface_mesh, generate_wireframe_indices,
+        )
+        z_scale = mountain_params['z_scale']
+
+        # Knowledge surface (solid green mesh)
+        verts, norms, cols, indices = generate_surface_mesh(
+            knowledge_field.grid, z_scale=z_scale, color=(0.2, 0.7, 0.3))
+        mesh_n_indices = len(indices)
+
+        vbo_m_pos = ctx.buffer(verts.tobytes())
+        vbo_m_nrm = ctx.buffer(norms.tobytes())
+        vbo_m_col = ctx.buffer(cols.tobytes())
+        ibo_mesh = ctx.buffer(indices.tobytes())
+        vao_mesh = ctx.vertex_array(prog_mesh, [
+            (vbo_m_pos, '3f', 'in_pos'),
+            (vbo_m_nrm, '3f', 'in_normal'),
+            (vbo_m_col, '3f', 'in_color'),
+        ], index_buffer=ibo_mesh)
+
+        # Ghost fitness surface (wireframe, pale blue)
+        if knowledge_field._fitness_grid is not None:
+            g_verts, g_norms, g_cols, _ = generate_surface_mesh(
+                knowledge_field._fitness_grid, z_scale=z_scale,
+                color=(0.4, 0.5, 0.9))
+            G = knowledge_field.G
+            wire_indices = generate_wireframe_indices(G)
+            ghost_n_indices = len(wire_indices)
+            vbo_g_pos = ctx.buffer(g_verts.tobytes())
+            vbo_g_col = ctx.buffer(g_cols.tobytes())
+            ibo_ghost = ctx.buffer(wire_indices.tobytes())
+            # Ghost shader only uses pos + color (no normals)
+            vao_ghost = ctx.vertex_array(prog_ghost, [
+                (vbo_g_pos, '3f', 'in_pos'),
+                (vbo_g_col, '3f', 'in_color'),
+            ], index_buffer=ibo_ghost)
+
+    def knowledge_step():
+        """One step of knowledge field dynamics.
+
+        PR1 scope: deposit knowledge + visionary nudge.
+        No reward, no social learning changes.
+        """
+        if knowledge_field is None:
+            return
+
+        pos = sim.pos  # (N, 3)
+        n = len(pos)
+        x = pos[:, 0].astype(np.float64)
+        y = pos[:, 1].astype(np.float64)
+
+        # ── Deposit knowledge at particle positions ──
+        write_rate = mountain_params['knowledge_write_rate']
+        amounts = np.full(n, write_rate, dtype=np.float64)
+        knowledge_field.deposit(x, y, amounts)
+
+        # ── Visionary nudge (small spatial drift toward hidden gradient) ──
+        vis_frac = mountain_params['visionary_fraction']
+        vis_nudge = mountain_params['visionary_nudge']
+        n_vis = max(1, int(vis_frac * n))
+        vis_mask = np.zeros(n, dtype=bool)
+        vis_mask[:n_vis] = True  # First n_vis particles are visionaries
+
+        if vis_nudge > 0 and n_vis > 0:
+            probes = np.column_stack([x[vis_mask], y[vis_mask]])
+            vis_grad = landscape.gradient(probes)
+            mag = np.linalg.norm(vis_grad, axis=1, keepdims=True)
+            mag = np.maximum(mag, 1e-10)
+            vis_dir = vis_grad / mag
+            # Apply spatial nudge
+            from .grid3d import SPACE
+            sim.pos[vis_mask, 0] = (pos[vis_mask, 0] +
+                                     vis_nudge * vis_dir[:, 0]) % SPACE
+            sim.pos[vis_mask, 1] = (pos[vis_mask, 1] +
+                                     vis_nudge * vis_dir[:, 1]) % SPACE
+
+        # ── Diffuse and decay the knowledge field ──
+        knowledge_field.step()
+
+        # ── Project particles onto knowledge surface (3D viz) ──
+        from .mountain_mesh import project_particles_to_surface
+        z_scale = mountain_params['z_scale']
+        projected = project_particles_to_surface(
+            knowledge_field, sim.pos, z_scale=z_scale)
+        sim.pos[:, :3] = projected.astype(sim.pos.dtype)
 
     # ── FPS tracking ──
     frame_count = 0
@@ -386,6 +564,10 @@ def main():
     prev_cam_el = camera.elevation
     prev_cam_dist = camera.distance
 
+    # Auto-build mountain if enabled at startup
+    if mountain_params['enabled'] and knowledge_field is None:
+        build_mountain()
+
     # ================================================================
     # MAIN LOOP
     # ================================================================
@@ -399,7 +581,14 @@ def main():
             reuse = params['reuse_neighbors']
             for sub in range(spf):
                 sim.step(reuse_neighbors=(reuse and sub > 0))
+                # Knowledge field step (mountain mode)
+                if mountain_params['enabled'] and knowledge_field is not None:
+                    knowledge_step()
         t_sim = time.perf_counter() - t0
+
+        # ── Update mountain mesh (every frame) ──
+        if mountain_params['enabled'] and knowledge_field is not None:
+            rebuild_mountain_mesh()
 
         # ── Upload particle data to GPU ──
         positions, colors = sim.get_render_data()
@@ -505,6 +694,17 @@ def main():
                 prog_line['mvp'].write(mvp_bytes)
                 prog_line['line_color'] = (1.0, 1.0, 1.0, 0.04)
                 vao_line.render(moderngl.LINES, vertices=n_circle_verts)
+
+        # Render mountain mesh (knowledge surface + ghost)
+        if mountain_params['enabled'] and vao_mesh is not None:
+            prog_mesh['mvp'].write(mvp_bytes)
+            prog_mesh['alpha'] = mountain_params['knowledge_alpha']
+            vao_mesh.render(moderngl.TRIANGLES)
+
+            if mountain_params['show_ghost'] and vao_ghost is not None:
+                prog_ghost['mvp'].write(mvp_bytes)
+                prog_ghost['alpha'] = mountain_params['ghost_alpha']
+                vao_ghost.render(moderngl.LINES)
 
         # Render particles
         prog_particle['mvp'].write(mvp_bytes)
@@ -787,6 +987,85 @@ def main():
                 changed, v = imgui.input_int("Seed##value", params['seed'])
                 if changed:
                     params['seed'] = v
+
+        # ── Mountain mode controls ──
+        if imgui.collapsing_header("Mountain Mode"):
+            changed, v = imgui.checkbox("Enabled##mtn", mountain_params['enabled'])
+            if changed:
+                mountain_params['enabled'] = v
+                if v and knowledge_field is None:
+                    build_mountain()
+
+            if mountain_params['enabled']:
+                # Metrics
+                if knowledge_field is not None:
+                    cov = knowledge_field.coverage()
+                    peak = knowledge_field.peak_knowledge()
+                    imgui.text(f"Knowledge: cov={cov:.1%}  peak={peak:.3f}")
+
+                imgui.separator()
+                imgui.text("Knowledge Field")
+                changed, v = imgui.drag_float(
+                    "Write Rate", mountain_params['knowledge_write_rate'],
+                    0.0001, 0.0, 0.05, "%.4f")
+                if changed:
+                    mountain_params['knowledge_write_rate'] = v
+                changed, v = imgui.drag_float(
+                    "Diffusion", mountain_params['diffusion_sigma'],
+                    0.05, 0.0, 5.0, "%.2f")
+                if changed:
+                    mountain_params['diffusion_sigma'] = v
+                    if knowledge_field is not None:
+                        knowledge_field.diffusion_sigma = v
+                changed, v = imgui.drag_float(
+                    "Decay", mountain_params['decay'],
+                    0.00001, 0.99, 1.0, "%.5f")
+                if changed:
+                    mountain_params['decay'] = v
+                    if knowledge_field is not None:
+                        knowledge_field.decay = v
+                changed, v = imgui.drag_float(
+                    "Max Slope", mountain_params['max_slope'],
+                    0.01, 0.0, 2.0, "%.2f")
+                if changed:
+                    mountain_params['max_slope'] = v
+                    if knowledge_field is not None:
+                        knowledge_field.max_slope = v
+
+                imgui.separator()
+                imgui.text("Visionary")
+                changed, v = imgui.drag_float(
+                    "Vis Fraction", mountain_params['visionary_fraction'],
+                    0.005, 0.0, 0.5, "%.3f")
+                if changed:
+                    mountain_params['visionary_fraction'] = v
+                changed, v = imgui.drag_float(
+                    "Vis Nudge", mountain_params['visionary_nudge'],
+                    0.0001, 0.0, 0.01, "%.4f")
+                if changed:
+                    mountain_params['visionary_nudge'] = v
+
+                imgui.separator()
+                imgui.text("Rendering")
+                changed, v = imgui.drag_float(
+                    "Z Scale", mountain_params['z_scale'],
+                    0.01, 0.0, 2.0, "%.2f")
+                if changed:
+                    mountain_params['z_scale'] = v
+                changed, v = imgui.checkbox(
+                    "Show Ghost", mountain_params['show_ghost'])
+                if changed:
+                    mountain_params['show_ghost'] = v
+                changed, v = imgui.drag_float(
+                    "Ghost Alpha", mountain_params['ghost_alpha'],
+                    0.005, 0.0, 1.0, "%.3f")
+                if changed:
+                    mountain_params['ghost_alpha'] = v
+                changed, v = imgui.drag_float(
+                    "Knowledge Alpha", mountain_params['knowledge_alpha'],
+                    0.01, 0.0, 1.0, "%.2f")
+                if changed:
+                    mountain_params['knowledge_alpha'] = v
 
         imgui.end()
 
