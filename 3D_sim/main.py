@@ -563,12 +563,20 @@ def main():
             sim.pos[visionary_mask, 0] %= 1.0
             sim.pos[visionary_mask, 1] %= 1.0
 
+    # Separate display buffer for 3D mountain projection
+    # (never overwrite sim.pos — physics needs the original coordinates)
+    mountain_display_pos = None
+
     def knowledge_deposit():
         """Deposit knowledge and update the field (after sim.step).
 
-        PR1: deposit, diffuse, decay, project particles onto surface.
+        PR1: deposit, diffuse, decay, compute display positions.
+        Does NOT modify sim.pos — the projected positions are stored
+        in mountain_display_pos for rendering only.
         """
+        nonlocal mountain_display_pos
         if knowledge_field is None:
+            mountain_display_pos = None
             return
 
         pos = sim.pos  # (N, 3)
@@ -584,12 +592,11 @@ def main():
         # ── Diffuse and decay the knowledge field ──
         knowledge_field.step()
 
-        # ── Project particles onto knowledge surface (3D viz) ──
+        # ── Compute display positions (3D viz only) ──
         from .mountain_mesh import project_particles_to_surface
         z_scale = mountain_params['z_scale']
-        projected = project_particles_to_surface(
+        mountain_display_pos = project_particles_to_surface(
             knowledge_field, sim.pos, z_scale=z_scale)
-        sim.pos[:, :3] = projected.astype(sim.pos.dtype)
 
     # ── FPS tracking ──
     frame_count = 0
@@ -661,6 +668,9 @@ def main():
 
         # ── Upload particle data to GPU ──
         positions, colors = sim.get_render_data()
+        # When mountain mode is active, use projected display positions
+        if mountain_params['enabled'] and mountain_display_pos is not None:
+            positions = mountain_display_pos
         vbo_pos.write(positions.tobytes())
         vbo_col.write(colors.tobytes())
 
