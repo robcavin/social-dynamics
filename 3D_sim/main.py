@@ -70,6 +70,9 @@ mountain_params = dict(
     decay=0.9999,                 # per-step decay (cf. memory_decay)
     support_radius=3,             # structural support neighbourhood (cells)
     max_slope=0.4,                # max height above local mean
+    # --- Visionary nudge (PR3) ---
+    visionary_fraction=0.02,      # fraction of particles that are visionaries
+    visionary_nudge=0.0005,       # spatial drift strength toward ∇F
     # --- Reward-modulated signals (PR2) ---
     reward_exp_scale=3.0,         # alpha in exp(alpha * h)
     reward_ema_tau=0.95,          # EMA smoothing for reward
@@ -370,7 +373,7 @@ def main():
         vao_line = ctx.vertex_array(prog_line, [(vbo_line, '3f', 'in_pos')])
 
     def do_reset():
-        nonlocal running_sim
+        nonlocal running_sim, visionary_mask
         if params['auto_scale']:
             ref = auto_scale_ref
             scale = (ref['n'] / params['num_particles']) ** (1.0 / 3.0)
@@ -385,6 +388,7 @@ def main():
             knowledge_field.decay = mountain_params['decay']
             knowledge_field.max_slope = mountain_params['max_slope']
         reward_ema = None
+        visionary_mask = None  # will be re-created on next compute_signals
         sim.signals = None
         trail_fbo.use()
         ctx.clear(0, 0, 0)
@@ -400,6 +404,7 @@ def main():
     knowledge_field = None
     landscape = None
     reward_ema = None  # (N,) EMA-smoothed reward per particle
+    visionary_mask = None  # (N,) bool — True for visionary particles
     _mountain_rng = np.random.default_rng(123)
 
     # Mountain mesh GPU buffers (initialised lazily)
@@ -493,7 +498,7 @@ def main():
         broadcast a stronger signal, making them more socially
         influential without changing the social learning rule itself.
         """
-        nonlocal reward_ema
+        nonlocal reward_ema, visionary_mask
         if knowledge_field is None:
             sim.signals = None
             return
@@ -530,6 +535,33 @@ def main():
             sim.signals = (sim.prefs * amplification).astype(sim.prefs.dtype)
         else:
             sim.signals = None  # no amplification, use raw prefs
+
+        # ── Visionary spatial nudge (PR3) ──
+        # A small fraction of particles sense the hidden fitness gradient
+        # and drift toward higher-fitness regions in (x, y) space.
+        vis_frac = mountain_params['visionary_fraction']
+        vis_nudge = mountain_params['visionary_nudge']
+        if vis_frac > 0 and vis_nudge > 0 and landscape is not None:
+            # Lazily create or resize the visionary mask
+            if visionary_mask is None or len(visionary_mask) != n:
+                n_vis = max(1, int(vis_frac * n))
+                mask = np.zeros(n, dtype=bool)
+                vis_ids = _mountain_rng.choice(n, size=n_vis, replace=False)
+                mask[vis_ids] = True
+                visionary_mask = mask
+
+            # Compute gradient of hidden fitness at visionary positions
+            vis_pos = pos[visionary_mask]  # (n_vis, 3)
+            grad = landscape.gradient(vis_pos)  # (n_vis, 2) — dF/dx, dF/dy
+            # Normalise gradient to unit direction (avoid large jumps)
+            grad_norm = np.linalg.norm(grad, axis=1, keepdims=True)
+            grad_dir = grad / np.maximum(grad_norm, 1e-12)
+            # Apply spatial nudge to x, y (columns 0, 1)
+            sim.pos[visionary_mask, 0] += vis_nudge * grad_dir[:, 0]
+            sim.pos[visionary_mask, 1] += vis_nudge * grad_dir[:, 1]
+            # Toroidal wrap
+            sim.pos[visionary_mask, 0] %= 1.0
+            sim.pos[visionary_mask, 1] %= 1.0
 
     def knowledge_deposit():
         """Deposit knowledge and update the field (after sim.step).
@@ -1089,6 +1121,24 @@ def main():
                 # Show mean reward for diagnostics
                 if reward_ema is not None:
                     imgui.text(f"Mean reward: {reward_ema.mean():.3f}  Max: {reward_ema.max():.3f}")
+
+                imgui.separator()
+                imgui.text("Visionaries (PR3)")
+                changed, v = imgui.drag_float(
+                    "Vis Fraction", mountain_params['visionary_fraction'],
+                    0.005, 0.0, 0.5, "%.3f")
+                if changed:
+                    mountain_params['visionary_fraction'] = v
+                    visionary_mask = None  # force re-creation
+                changed, v = imgui.drag_float(
+                    "Vis Nudge", mountain_params['visionary_nudge'],
+                    0.0001, 0.0, 0.01, "%.4f")
+                if changed:
+                    mountain_params['visionary_nudge'] = v
+                # Show visionary count
+                if visionary_mask is not None:
+                    n_vis = visionary_mask.sum()
+                    imgui.text(f"Visionaries: {n_vis}/{len(visionary_mask)}")
 
                 imgui.separator()
                 imgui.text("Rendering")

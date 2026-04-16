@@ -1,0 +1,29 @@
+PR3 Verification Results
+========================
+
+All 5/5 tests pass.
+
+Panel 1 (Top Left) - Fitness: Visionaries vs Regulars
+- Visionaries quickly climb to mean fitness ~0.58 (within ~1000 steps)
+- Regulars stay flat at ~0.30 throughout
+- 1.95x fitness ratio — clear separation
+- Visionaries find and stay on high-fitness peaks
+
+Panel 2 (Top Right) - Final Particle Positions
+- Red stars (visionaries) cluster near peaks in the fitness landscape
+- Gray dots (regulars) spread uniformly across the domain
+- Visionaries are near local/global peaks, not just the global one
+- This confirms gradient climbing works correctly (follows local gradient)
+
+Panel 3 (Bottom Left) - Knowledge Coverage Growth
+- Coverage reaches ~66% by step 5000, then plateaus
+- Steady growth, no anomalies from visionary nudge
+
+Panel 4 (Bottom Right) - Peak Knowledge: With vs Without Visionaries
+- With visionaries: peak knowledge slightly higher (~0.52 vs ~0.49)
+- Small but consistent advantage — visionaries deposit knowledge at high-fitness locations
+- The fitness ceiling allows higher knowledge where visionaries cluster
+
+Key insight: The fitness-based test is much more meaningful than distance-to-peak.
+Visionaries climb to local optima, not necessarily the global peak.
+This is correct behavior for gradient following on a rugged landscape.
