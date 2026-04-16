@@ -93,10 +93,13 @@ def main():
 
     if args.mountain:
         mountain_params['enabled'] = True
-        # Good defaults for mountain mode
+        # Good defaults for mountain mode:
+        # flat_z=True so physics is 2D (matching the knowledge field)
+        # social > 0 for visible swirling / social learning
         params['k'] = 3
-        params['social'] = 0.01
-        params['step_size'] = 0.003
+        params['flat_z'] = True
+        params['social'] = 0.03
+        params['step_size'] = 0.005
         params['inner_prod_avg'] = True
         params['num_particles'] = 500
 
